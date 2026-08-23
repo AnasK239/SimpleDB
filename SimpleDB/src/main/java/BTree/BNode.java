@@ -96,6 +96,7 @@ public class BNode {
         int pos = getKvPos(idx);
         int keyLength = Short.toUnsignedInt(buffer.getShort(pos));
 
+        //TODO: Optimize
         return Arrays.copyOfRange(data, pos+4 , pos + 4 + keyLength);
     }
 
@@ -108,10 +109,78 @@ public class BNode {
         int keyLength = Short.toUnsignedInt(buffer.getShort(pos));
         int valueLength = Short.toUnsignedInt(buffer.getShort(pos+2));
 
+        //TODO: Optimize
         return Arrays.copyOfRange(
                 data,
                 pos + 4 + keyLength,
                 pos + 4 + keyLength + valueLength
         );
     }
+
+    public int getSizeBytes() {
+        return getKvPos(this.getNumberOfKeys());
+    }
+
+
+    public void appendKV(int idx, long ptr, byte[] key, byte[] val) {
+        this.setPtr(idx , ptr);
+        int pos = this.getKvPos(idx);
+
+        buffer.putShort(pos , (short)key.length);
+        buffer.putShort(pos+2, (short)val.length);
+
+        System.arraycopy(
+                key,
+                0,
+                data,
+                pos + 4,
+                key.length
+        );
+
+        System.arraycopy(
+                val,
+                0,
+                data,
+                pos + 4 + key.length,
+                val.length
+        );
+
+        this.setOffset(
+                idx + 1,
+                this.getOffset(idx) + 4 + key.length + val.length
+        );
+    }
+
+    public void appendRange(BNode oldNode , int dstNew , int srcOld , int len){
+        for(int i = 0 ; i < len ; i++){
+            int dst = dstNew + i;
+            int src = srcOld + i;
+
+            this.appendKV(
+                    dst ,
+                    oldNode.getPtr(src) ,
+                    oldNode.getKey(src) ,
+                    oldNode.getValue(src)
+            );
+        }
+    }
+
+    public int lookupLE(byte[] key){
+        int nkeys = getNumberOfKeys();
+
+        for(int i = 0 ; i < nkeys ; i++){
+            int cmp = Arrays.compareUnsigned(this.getKey(i) , key);
+
+            if(cmp == 0){
+                return i;
+            }
+
+            if(cmp > 0){
+                return i-1;
+            }
+        }
+
+        return nkeys-1;
+    }
+
 }
