@@ -1,7 +1,11 @@
 package BTree;
 
 
+import KV.Comparison;
+
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 
 public class BTREE {
@@ -701,6 +705,63 @@ public class BTREE {
 
     BNode getNode(long pageNumber) {
         return new BNode(pageGetter.get(pageNumber));
+    }
+
+    public BIter seekLE(byte[] key) {
+        List<BNode> path = new ArrayList<>();
+        List<Integer> positions = new ArrayList<>();
+
+        long page = root;
+
+        while (page != 0) {
+            BNode node = getNode(page);
+            int index = node.lookupLE(key);
+
+            path.add(node);
+            positions.add(index);
+
+            if (node.getType() == NodeType.LEAF.getVal()) {
+                break;
+            }
+
+            page = node.getPtr(index);
+        }
+
+        return new BIter(this, path, positions);
+    }
+
+    public BIter seek(byte[] key, Comparison comparison) {
+        BIter iterator = seekLE(key);
+
+        if (!iterator.hasPosition()) {
+            return iterator;
+        }
+
+        int cmp = iterator.compareKey(key);
+
+        switch (comparison) {
+            case LE -> {
+                // seekLE already found the desired position.
+            }
+
+            case LT -> {
+                if (cmp == 0) {
+                    iterator.prev();
+                }
+            }
+
+            case GE -> {
+                if (cmp < 0) {
+                    iterator.next();
+                }
+            }
+
+            case GT -> {
+                iterator.next();
+            }
+        }
+
+        return iterator;
     }
 
     private long allocateNode(BNode node) {

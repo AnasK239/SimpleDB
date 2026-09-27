@@ -1,8 +1,6 @@
 package KV;
 
 import BTree.*;
-import BTree.LNode;
-
 import java.util.Arrays;
 
 public class FreeList {

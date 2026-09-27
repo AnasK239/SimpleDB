@@ -1,7 +1,6 @@
 package KV;
 
 import BTree.*;
-import BTree.LNode;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -460,6 +459,11 @@ public class KV implements AutoCloseable {
         );
     }
 
+    public BIter seek(byte[] key, Comparison comparison) {
+        ensureOpen();
+
+        return tree.seek(key, comparison);
+    }
 
 //    long getPageFlushed() {
 //        return pageFlushed;
