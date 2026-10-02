@@ -7,6 +7,9 @@ public final class RecordChecks {
     private RecordChecks() {}
 
     public static void validateTable(TableDef table) {
+        if (table.cols.length != table.types.length || table.indexes.length == 0) {
+            throw new IllegalArgumentException("Invalid table definition");
+        }
 
         Set<String> names = new HashSet<>();
 
@@ -14,15 +17,34 @@ public final class RecordChecks {
             String name = table.cols[i];
 
             if (name == null || name.isBlank() || !names.add(name)) {
-                throw new IllegalArgumentException(
-                        "Empty or duplicate column name: " + name
-                );
+                throw new IllegalArgumentException("Empty or duplicate column name: " + name);
             }
 
             int type = table.types[i];
 
+            if (type != Value.TYPE_BYTES && type != Value.TYPE_INT64) {
+                throw new IllegalArgumentException("Unsupported type for column: " + name);
+            }
+        }
 
+        for (String[] index : table.indexes) {
+            if (index.length == 0) {
+                throw new IllegalArgumentException("An index needs columns");
+            }
 
+            Set<String> used = new HashSet<>();
+
+            for (String column : index) {
+                if (!names.contains(column) || !used.add(column)) {
+                    throw new IllegalArgumentException("Unknown or repeated index column: " + column);
+                }
+            }
+        }
+
+        for (int i = 0; i < table.primaryKeyCount(); i++) {
+            if (!table.cols[i].equals(table.indexes[0][i])) {
+                throw new IllegalArgumentException("Primary-key columns must come first in schema order");
+            }
         }
     }
 
@@ -30,7 +52,7 @@ public final class RecordChecks {
 
         validateTable(table);
 
-        if (requiredColumns != table.PKeys && requiredColumns != table.cols.length) {
+        if (requiredColumns != table.primaryKeyCount() && requiredColumns != table.cols.length) {
             throw new IllegalArgumentException(
                     "Expected primary-key columns or a complete row"
             );
@@ -83,5 +105,34 @@ public final class RecordChecks {
         }
 
         return ordered;
+    }
+
+    public static Value[] checkIndexPrefix(TableDef table, int index, DBRecord record) {
+        String[] columns = table.indexes[index];
+
+        if (record.cols.size() != record.vals.size() || record.cols.size() > columns.length) {
+            throw new IllegalArgumentException("Invalid scan bound");
+        }
+
+        Value[] values = new Value[record.cols.size()];
+
+        for (int i = 0; i < values.length; i++) {
+            String column = record.cols.get(i);
+
+            if (!columns[i].equals(column)) {
+                throw new IllegalArgumentException("Scan columns must match the beginning of the index");
+            }
+
+            Value value = record.vals.get(i);
+            int expectedType = table.types[table.columnIndex(column)];
+
+            if (value == null || value.type != expectedType) {
+                throw new IllegalArgumentException("Incorrect value type for column: " + column);
+            }
+
+            values[i] = value;
+        }
+
+        return values;
     }
 }

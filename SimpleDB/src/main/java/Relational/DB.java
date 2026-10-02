@@ -41,19 +41,19 @@ public final class DB implements AutoCloseable {
         return dbGet(table, record);
     }
 
-    private boolean dbGet(TableDef table, DBRecord record) throws IOException {
+    boolean dbGet(TableDef table, DBRecord record) throws IOException {
 
         //Validate primary-key columns and put them in schema order
         Value[] ordered = RecordChecks.checkRecord(
                 table,
                 record,
-                table.PKeys
+                table.primaryKeyCount()
         );
 
 
         byte[] key = RowCodec.encodeKey(
-                table.prefix,
-                Arrays.copyOf(ordered, table.PKeys)
+                table.prefixes[0],
+                Arrays.copyOf(ordered, table.primaryKeyCount())
         );
 
         byte[] stored = kv.get(key);
@@ -64,7 +64,7 @@ public final class DB implements AutoCloseable {
 
         int[] remainingTypes = Arrays.copyOfRange(
                 table.types,
-                table.PKeys,
+                table.primaryKeyCount(),
                 table.types.length
         );
 
@@ -74,7 +74,7 @@ public final class DB implements AutoCloseable {
                 remaining,
                 0,
                 ordered,
-                table.PKeys,
+                table.primaryKeyCount(),
                 remaining.length
         );
 
@@ -124,9 +124,7 @@ public final class DB implements AutoCloseable {
 
         TableDef table = requireTable(tableName);
 
-        boolean forward =
-                scanner.cmp1 == Comparison.GE
-                        || scanner.cmp1 == Comparison.GT;
+        boolean forward = scanner.cmp1 == Comparison.GE || scanner.cmp1 == Comparison.GT;
 
         boolean validEndComparison = forward
                 ? scanner.cmp2 == Comparison.LE
@@ -135,36 +133,58 @@ public final class DB implements AutoCloseable {
                 || scanner.cmp2 == Comparison.GT;
 
         if (!validEndComparison) {
-            throw new IllegalArgumentException(
-                    "Scan bounds must face opposite directions"
-            );
+            throw new IllegalArgumentException("Scan bounds must face opposite directions");
         }
 
-        Value[] startValues = RecordChecks.checkRecord(
+        int selectedIndex = -1;
+
+        for (int i = 0; i < table.indexes.length; i++) {
+            if (matchesIndex(table.indexes[i], scanner.key1)
+                    && matchesIndex(table.indexes[i], scanner.key2)) {
+                selectedIndex = i;
+                break;
+            }
+        }
+
+        if (selectedIndex < 0) {
+            throw new IllegalArgumentException("No index matches the scan columns");
+        }
+
+        Value[] startValues = RecordChecks.checkIndexPrefix(
                 table,
-                scanner.key1,
-                table.PKeys
+                selectedIndex,
+                scanner.key1
         );
 
-        Value[] endValues = RecordChecks.checkRecord(
+        Value[] endValues = RecordChecks.checkIndexPrefix(
                 table,
-                scanner.key2,
-                table.PKeys
+                selectedIndex,
+                scanner.key2
         );
 
-        byte[] startKey = RowCodec.encodeKey(
-                table.prefix,
-                Arrays.copyOf(startValues, table.PKeys)
+        long prefix = table.prefixes[selectedIndex];
+
+        byte[] startKey = RowCodec.encodeKeyPartial(
+                prefix,
+                startValues,
+                scanner.cmp1
         );
 
-        byte[] endKey = RowCodec.encodeKey(
-                table.prefix,
-                Arrays.copyOf(endValues, table.PKeys)
+        byte[] endKey = RowCodec.encodeKeyPartial(
+                prefix,
+                endValues,
+                scanner.cmp2
         );
 
         BIter iterator = kv.seek(startKey, scanner.cmp1);
 
-        scanner.init(table, iterator, endKey);
+        scanner.init(
+                this,
+                table,
+                selectedIndex,
+                iterator,
+                endKey
+        );
     }
 
     public UpdateResult insert(String tableName, DBRecord record) throws Exception {
@@ -205,14 +225,14 @@ public final class DB implements AutoCloseable {
         );
 
         byte[] key = RowCodec.encodeKey(
-                table.prefix,
-                Arrays.copyOf(ordered, table.PKeys)
+                table.prefixes[0],
+                Arrays.copyOf(ordered, table.primaryKeyCount())
         );
 
         byte[] value = RowCodec.encodeValues(
                 Arrays.copyOfRange(
                         ordered,
-                        table.PKeys,
+                        table.primaryKeyCount(),
                         ordered.length
                 )
         );
@@ -220,11 +240,61 @@ public final class DB implements AutoCloseable {
         return new EncodedRow(key, value);
     }
 
+    static DBRecord decodeRow(TableDef table, byte[] key, byte[] value) throws IOException {
+
+        int primaryCount = table.primaryKeyCount();
+
+        Value[] primary = RowCodec.decodeValues(
+                Arrays.copyOfRange(key, Integer.BYTES, key.length),
+                Arrays.copyOf(table.types, primaryCount)
+        );
+
+        Value[] remaining = RowCodec.decodeValues(
+                value,
+                Arrays.copyOfRange(
+                        table.types,
+                        primaryCount,
+                        table.types.length
+                )
+        );
+
+        DBRecord row = new DBRecord();
+
+        row.cols.addAll(Arrays.asList(table.cols));
+        row.vals.addAll(Arrays.asList(primary));
+        row.vals.addAll(Arrays.asList(remaining));
+
+        return row;
+    }
+
     private UpdateResult dbUpdate(TableDef table, DBRecord record, UpdateMode mode) throws Exception {
 
         EncodedRow encoded = encodeRow(table, record);
+        byte[][] newKeys = secondaryKeys(table, record);
 
-        return kv.update(encoded.key(), encoded.value(), mode);
+        UpdateResult result = kv.update(
+                encoded.key(),
+                encoded.value(),
+                mode
+        );
+
+        if (!result.applied()) {
+            return result;
+        }
+
+        if (!result.added()) {
+            DBRecord oldRow = decodeRow(
+                    table,
+                    encoded.key(),
+                    result.oldValue()
+            );
+
+            deleteSecondaryKeys(secondaryKeys(table, oldRow));
+        }
+
+        addSecondaryKeys(newKeys);
+
+        return result;
     }
 
     private TableDef requireTable(String name) throws IOException {
@@ -244,25 +314,40 @@ public final class DB implements AutoCloseable {
         Value[] ordered = RecordChecks.checkRecord(
                 table,
                 record,
-                table.PKeys
+                table.primaryKeyCount()
         );
 
         byte[] key = RowCodec.encodeKey(
-                table.prefix,
-                Arrays.copyOf(ordered, table.PKeys)
+                table.prefixes[0],
+                Arrays.copyOf(ordered, table.primaryKeyCount())
         );
 
-        return kv.delete(key);
+        byte[] oldValue = kv.get(key);
+
+        if (oldValue == null) {
+            return false;
+        }
+
+        DBRecord oldRow = decodeRow(table, key, oldValue);
+        byte[][] oldKeys = secondaryKeys(table, oldRow);
+
+        if (!kv.delete(key)) {
+            return false;
+        }
+
+        deleteSecondaryKeys(oldKeys);
+
+        return true;
     }
 
     public void tableNew(TableDef definition) throws Exception {
         RecordChecks.validateTable(definition);
         checkUserTableName(definition.name);
 
-        if (definition.prefix != 0) {
-            throw new IllegalArgumentException(
-                    "The database assigns the table prefix; supply 0"
-            );
+        for (long prefix : definition.prefixes) {
+            if (prefix != 0) {
+                throw new IllegalArgumentException("The database assigns index prefixes");
+            }
         }
 
         if (getTableDef(definition.name) != null) {
@@ -271,35 +356,44 @@ public final class DB implements AutoCloseable {
             );
         }
 
-        // Read the next unused prefix.
         DBRecord counterLookup = new DBRecord()
                 .addStr("key", PREFIX_COUNTER_KEY);
 
         long nextPrefix = FIRST_USER_PREFIX;
 
         if (dbGet(InternalTables.TDEF_META, counterLookup)) {
-
-            byte[] bytes = counterLookup.get("val").str;
-
-            nextPrefix = ByteBuffer.wrap(bytes).getLong();
+            nextPrefix = ByteBuffer.wrap(counterLookup.get("val").str)
+                    .getLong();
         }
 
-        // Keep the caller's definition unchanged until success.
+        int indexCount = definition.indexes.length;
+
+        if (nextPrefix < FIRST_USER_PREFIX || nextPrefix > MAX_PREFIX - indexCount + 1) {
+            throw new IllegalStateException("No index prefixes remaining");
+        }
+
+        // Work on a separate schema until its writes succeed.
+        String[][] indexes = new String[indexCount][];
+
+        for (int i = 0; i < indexCount; i++) {
+            indexes[i] = definition.indexes[i].clone();
+        }
+
         TableDef assigned = new TableDef(
                 definition.name,
-                Arrays.copyOf(
-                        definition.types,
-                        definition.types.length
-                ),
-                Arrays.copyOf(
-                        definition.cols,
-                        definition.cols.length
-                ),
-                definition.PKeys,
-                nextPrefix
+                definition.types.clone(),
+                definition.cols.clone(),
+                indexes
         );
 
-        byte[] schemaJson = JSON.toJson(assigned).getBytes(StandardCharsets.UTF_8);
+        assigned.completeIndexes();
+
+        for (int i = 0; i < indexCount; i++) {
+            assigned.prefixes[i] = nextPrefix + i;
+        }
+
+        byte[] schemaJson = JSON.toJson(assigned)
+                .getBytes(StandardCharsets.UTF_8);
 
         DBRecord schemaRecord = new DBRecord()
                 .addStr(
@@ -308,7 +402,6 @@ public final class DB implements AutoCloseable {
                 )
                 .addStr("def", schemaJson);
 
-        // Validate/encode the schema before changing the counter
         EncodedRow encodedSchema = encodeRow(
                 InternalTables.TDEF_TABLE,
                 schemaRecord
@@ -316,21 +409,19 @@ public final class DB implements AutoCloseable {
 
         byte[] nextCounter = ByteBuffer
                 .allocate(Long.BYTES)
-                .putLong(nextPrefix + 1)
+                .putLong(nextPrefix + indexCount)
                 .array();
 
         DBRecord counterRecord = new DBRecord()
                 .addStr("key", PREFIX_COUNTER_KEY)
                 .addStr("val", nextCounter);
 
-        // First committed write: reserve the prefix
         dbUpdate(
                 InternalTables.TDEF_META,
                 counterRecord,
                 UpdateMode.UPSERT
         );
 
-        // Second committed write: store the table definition
         UpdateResult result = kv.update(
                 encodedSchema.key(),
                 encodedSchema.value(),
@@ -338,17 +429,60 @@ public final class DB implements AutoCloseable {
         );
 
         if (!result.applied()) {
-            throw new IllegalStateException(
-                    "Table definition was not inserted"
-            );
+            throw new IllegalStateException("Table definition was not inserted");
         }
 
-        definition.prefix = assigned.prefix;
+        definition.indexes = assigned.indexes;
+        definition.prefixes = assigned.prefixes;
     }
 
     private static void checkUserTableName(String name) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Table name is empty");
         }
+    }
+
+    private byte[][] secondaryKeys(TableDef table, DBRecord row) throws IOException {
+
+        byte[][] keys = new byte[table.indexes.length - 1][];
+
+        for (int index = 1; index < table.indexes.length; index++) {
+            String[] columns = table.indexes[index];
+            Value[] values = new Value[columns.length];
+
+            for (int i = 0; i < columns.length; i++) {
+                values[i] = row.get(columns[i]);
+            }
+
+            keys[index - 1] = RowCodec.encodeKey(table.prefixes[index], values);
+        }
+
+        return keys;
+    }
+
+    private void addSecondaryKeys(byte[][] keys) throws Exception {
+        for (byte[] key : keys) {
+            kv.update(key, new byte[0], UpdateMode.UPSERT);
+        }
+    }
+
+    private void deleteSecondaryKeys(byte[][] keys) throws Exception {
+        for (byte[] key : keys) {
+            kv.delete(key);
+        }
+    }
+
+    private static boolean matchesIndex(String[] index, DBRecord bound) {
+        if (bound.cols.size() > index.length) {
+            return false;
+        }
+
+        for (int i = 0; i < bound.cols.size(); i++) {
+            if (!index[i].equals(bound.cols.get(i))) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

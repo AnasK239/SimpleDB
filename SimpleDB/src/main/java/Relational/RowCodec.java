@@ -1,11 +1,14 @@
 package Relational;
 
+import KV.Comparison;
+
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 public final class RowCodec {
 
@@ -36,9 +39,65 @@ public final class RowCodec {
         return bytes.toByteArray();
     }
 
+    public static Value[] decodeValues(byte[] data, int[] types) throws IOException {
+
+        ByteBuffer buffer = ByteBuffer
+                .wrap(data)
+                .order(ByteOrder.BIG_ENDIAN);
+
+        Value[] values = new Value[types.length];
+
+        try {
+            for (int i = 0; i < types.length; i++) {
+
+                int storedType = Byte.toUnsignedInt(buffer.get());
+
+                if (storedType != types[i]) {
+                    throw new IOException("Stored column type does not match schema");
+                }
+
+                switch (types[i]) {
+
+                    case Value.TYPE_INT64 ->
+                            values[i] = Value.ofInt64(buffer.getLong() ^ Long.MIN_VALUE);
+
+                    case Value.TYPE_BYTES ->
+                            values[i] = Value.ofBytes(readBytes(buffer));
+
+                    default ->
+                            throw new IOException("Unsupported stored column type: " + types[i]);
+                }
+            }
+
+        } catch (BufferUnderflowException e) {
+            throw new IOException("Incomplete encoded row", e);
+        }
+
+        if (buffer.hasRemaining()) {
+            throw new IOException("Unexpected bytes after encoded row");
+        }
+
+        return values;
+    }
+
+    public static byte[] encodeKeyPartial(long prefix, Value[] values , Comparison comparison) throws IOException {
+        byte[] key = encodeKey(prefix, values);
+
+        if (comparison == Comparison.GT || comparison == Comparison.LE) {
+            byte[] upperBoundary = Arrays.copyOf(key, key.length + 1);
+            upperBoundary[key.length] = (byte) 0xFF;
+
+            return upperBoundary;
+        }
+        return key;
+    }
+
     private static void writeValues(DataOutputStream out, Value[] values) throws IOException {
 
         for (Value value : values) {
+
+            out.writeByte(value.type);
+
             switch (value.type) {
 
                 case Value.TYPE_INT64 ->
@@ -74,40 +133,6 @@ public final class RowCodec {
         }
 
         out.writeByte(0);
-    }
-
-    public static Value[] decodeValues(byte[] data, int[] types) throws IOException {
-
-        ByteBuffer buffer = ByteBuffer
-                .wrap(data)
-                .order(ByteOrder.BIG_ENDIAN);
-
-        Value[] values = new Value[types.length];
-
-        try {
-            for (int i = 0; i < types.length; i++) {
-                switch (types[i]) {
-
-                    case Value.TYPE_INT64 ->
-                            values[i] = Value.ofInt64(buffer.getLong() ^ Long.MIN_VALUE);
-
-                    case Value.TYPE_BYTES ->
-                            values[i] = Value.ofBytes(readBytes(buffer));
-
-                    default ->
-                            throw new IOException("Unsupported stored column type: " + types[i]);
-                }
-            }
-
-        } catch (BufferUnderflowException e) {
-            throw new IOException("Incomplete encoded row", e);
-        }
-
-        if (buffer.hasRemaining()) {
-            throw new IOException("Unexpected bytes after encoded row");
-        }
-
-        return values;
     }
 
     private static byte[] readBytes(ByteBuffer buffer) throws IOException {

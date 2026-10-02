@@ -455,7 +455,8 @@ public class KV implements AutoCloseable {
 
         return new UpdateResult(
                 request.applied,
-                request.added
+                request.added,
+                request.oldValue
         );
     }
 

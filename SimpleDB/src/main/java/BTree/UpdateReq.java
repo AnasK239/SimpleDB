@@ -11,6 +11,7 @@ public final class UpdateReq {
     // Outputs
     public boolean added;
     public boolean applied;
+    public byte[] oldValue;
 
     public UpdateReq(byte[] key, byte[] value, UpdateMode mode) {
         this.key = key;

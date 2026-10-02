@@ -822,16 +822,24 @@ public class BTREE {
     public void update(UpdateReq request) throws Exception {
         request.added = false;
         request.applied = false;
+        request.oldValue = null;
 
         checkLimit(request.key, request.value);
 
-        boolean exists = get(request.key) != null;
+        byte[] oldValue = get(request.key);
+        boolean exists = oldValue != null;
+
+        request.oldValue = oldValue;
 
         if (request.mode == UpdateMode.INSERT_ONLY && exists) {
             return;
         }
 
         if (request.mode == UpdateMode.UPDATE_ONLY && !exists) {
+            return;
+        }
+
+        if(exists && Arrays.equals(oldValue, request.value)) {
             return;
         }
 

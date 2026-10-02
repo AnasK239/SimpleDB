@@ -9,43 +9,40 @@ import java.util.Arrays;
 
 public final class Scanner {
 
-    // Inputs: the requested interval
     public final Comparison cmp1;
     public final Comparison cmp2;
 
     public final DBRecord key1;
     public final DBRecord key2;
 
-    // Set by DB.scan()
+    private DB db;
     private TableDef table;
+    private int index;
+
     private BIter iterator;
     private byte[] endKey;
+    private int[] indexTypes;
 
-    private int[] primaryKeyTypes;
-    private int[] remainingTypes;
-
-    public Scanner(Comparison cmp1, DBRecord key1, Comparison cmp2, DBRecord key2) {
+    public Scanner(
+            Comparison cmp1,
+            DBRecord key1,
+            Comparison cmp2,
+            DBRecord key2
+    ) {
         this.cmp1 = cmp1;
         this.key1 = key1;
         this.cmp2 = cmp2;
         this.key2 = key2;
     }
 
-    void init(TableDef table, BIter iterator, byte[] endKey) {
+    void init(DB db, TableDef table, int index, BIter iterator, byte[] endKey) {
+        this.db = db;
         this.table = table;
+        this.index = index;
         this.iterator = iterator;
         this.endKey = endKey;
 
-        primaryKeyTypes = Arrays.copyOf(
-                table.types,
-                table.PKeys
-        );
-
-        remainingTypes = Arrays.copyOfRange(
-                table.types,
-                table.PKeys,
-                table.types.length
-        );
+        this.indexTypes = table.indexTypes(index);
     }
 
     public boolean valid() {
@@ -55,8 +52,8 @@ public final class Scanner {
 
         byte[] key = iterator.deref().key();
 
-        if (key.length < Integer.BYTES
-                || ByteBuffer.wrap(key).getInt() != (int) table.prefix) {
+        // Remain inside the selected index's key space.
+        if (key.length < Integer.BYTES || ByteBuffer.wrap(key).getInt() != (int) table.prefixes[index]) {
             return false;
         }
 
@@ -88,28 +85,49 @@ public final class Scanner {
         }
 
         KVPair pair = iterator.deref();
+        DBRecord row;
 
-        byte[] encodedPrimaryKey = Arrays.copyOfRange(
-                pair.key(),
-                Integer.BYTES,
-                pair.key().length
-        );
+        if (index == 0) {
+            // The primary entry already contains the whole row.
+            row = DB.decodeRow(table, pair.key(), pair.value());
+        } else {
+            // A secondary entry contains indexed columns
+            // and all primary-key columns inside its key.
+            byte[] encodedColumns = Arrays.copyOfRange(
+                    pair.key(),
+                    Integer.BYTES,
+                    pair.key().length
+            );
 
-        Value[] primaryKey = RowCodec.decodeValues(
-                encodedPrimaryKey,
-                primaryKeyTypes
-        );
+            Value[] values = RowCodec.decodeValues(
+                    encodedColumns,
+                    indexTypes
+            );
 
-        Value[] remaining = RowCodec.decodeValues(
-                pair.value(),
-                remainingTypes
-        );
+            String[] columns = table.indexes[index];
+
+            DBRecord indexed = new DBRecord();
+            indexed.cols.addAll(Arrays.asList(columns));
+            indexed.vals.addAll(Arrays.asList(values));
+
+            // Build a primary-key-only lookup.
+            row = new DBRecord();
+
+            for (String primaryColumn : table.indexes[0]) {
+                row.cols.add(primaryColumn);
+                row.vals.add(indexed.get(primaryColumn));
+            }
+
+            // dbGet replaces the lookup with the complete row.
+            if (!db.dbGet(table, row)) {
+                throw new IOException("Secondary index points to a missing row");
+            }
+        }
 
         record.cols.clear();
-        record.cols.addAll(Arrays.asList(table.cols));
+        record.cols.addAll(row.cols);
 
         record.vals.clear();
-        record.vals.addAll(Arrays.asList(primaryKey));
-        record.vals.addAll(Arrays.asList(remaining));
+        record.vals.addAll(row.vals);
     }
 }
