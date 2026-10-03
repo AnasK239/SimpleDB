@@ -1,4 +1,6 @@
-package BTree;
+package Tests;
+
+import BTree.*;
 
 import java.util.HashMap;
 import java.util.Map;

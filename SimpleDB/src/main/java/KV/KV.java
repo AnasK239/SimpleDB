@@ -15,53 +15,34 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class KV implements AutoCloseable {
+    record Meta(
+            long root,
+            long pages,
+            FreeList.State freeState
+    ) {}
 
     private final Path path;
-
     private FileChannel file;
 
     private BTREE tree;
-
     private FreeList free;
+
+    private KVTX activeTransaction;
 
     private static final byte[] SIGNATURE = Arrays.copyOf(
             "SimpleDB07".getBytes(StandardCharsets.UTF_8),
             16
     );
-
     private static final int META_SIZE = 64;
 
     private boolean failed;
 
     private long pageFlushed = 2;
-
     private long nappend;
-
     private final Map<Long , byte[]> updates = new HashMap<>();
 
     public KV(Path path) {
         this.path = path;
-    }
-
-    public void set(byte[] key, byte[] value) throws Exception {
-        mutate(() -> {
-            tree.insert(key, value);
-            return true;
-        });
-    }
-
-    public boolean delete(byte[] key) throws Exception {
-        return mutate(() -> tree.delete(key));
-    }
-
-    public byte[] get(byte[] key) throws IOException {
-        ensureOpen();
-
-        try {
-            return tree.get(key);
-        } catch (UncheckedIOException error) {
-            throw error.getCause();
-        }
     }
 
     public void open() throws IOException {
@@ -137,7 +118,6 @@ public class KV implements AutoCloseable {
             throw error;
         }
     }
-
 
     private byte[] pageRead(long pageNumber){
         byte[] pending = updates.get(pageNumber);
@@ -243,16 +223,6 @@ public class KV implements AutoCloseable {
     private void clearPending() {
         updates.clear();
         nappend = 0;
-    }
-
-
-    public BTREE tree() {
-
-        if (tree == null) {
-            throw new IllegalStateException("Database is not open");
-        }
-
-        return tree;
     }
 
     private Meta currentMeta() {
@@ -406,65 +376,70 @@ public class KV implements AutoCloseable {
         }
     }
 
-    private boolean mutate(Mutation mutation) throws Exception {
+    public KVTX begin() throws IOException {
         ensureOpen();
+
+        if (activeTransaction != null) throw new IllegalStateException("A transaction is already active");
 
         Meta before = currentMeta();
 
-        // A previous write failure may have left uncertain metadata
-        // Restore the old metadata before writing any replacement pages
         if (failed) {
             writeMeta(before);
             file.force(true);
             failed = false;
         }
 
-        boolean writingFile = false;
+        KVTX transaction = new KVTX(this, before);
+        activeTransaction = transaction;
+
+        return transaction;
+    }
+
+    boolean isActive(KVTX transaction) {
+        return activeTransaction == transaction;
+    }
+
+    private void requireActive(KVTX transaction) {
+        ensureOpen();
+
+        if (!isActive(transaction)) throw new IllegalStateException("Transaction is no longer active");
+    }
+
+    BTREE transactionTree(KVTX transaction) {
+        requireActive(transaction);
+        return tree;
+    }
+
+    void commit(KVTX transaction) throws IOException {
+        requireActive(transaction);
 
         try {
-            boolean changed = mutation.apply();
-
-            if (!changed) {
-                return false;
+            // A read-only transaction has nothing to write
+            if (!updates.isEmpty()) {
+                updateFile();
             }
-
-            writingFile = true;
-            updateFile();
-
-            return true;
-        } catch (Exception error) {
+        } catch (IOException | RuntimeException error) {
             clearPending();
-            restoreMeta(before);
+            restoreMeta(transaction.before);
 
-            if (writingFile) {
-                failed = true;
-            }
+            // Disk metadata may be uncertain after a failed commit
+            failed = true;
 
             throw error;
+        } finally {
+            activeTransaction = null;
         }
     }
 
-    public UpdateResult update(byte[] key, byte[] value, UpdateMode mode) throws Exception {
+    void abort(KVTX transaction) {
+        requireActive(transaction);
 
-        UpdateReq request = new UpdateReq(key, value, mode);
+        clearPending();
+        restoreMeta(transaction.before);
 
-        mutate(() -> {
-            tree.update(request);
-            return request.applied;
-        });
-
-        return new UpdateResult(
-                request.applied,
-                request.added,
-                request.oldValue
-        );
+        activeTransaction = null;
     }
 
-    public BIter seek(byte[] key, Comparison comparison) {
-        ensureOpen();
-
-        return tree.seek(key, comparison);
-    }
 
 //    long getPageFlushed() {
 //        return pageFlushed;
@@ -476,13 +451,12 @@ public class KV implements AutoCloseable {
 //    }
 
 
-    @FunctionalInterface
-    private interface Mutation {
-        boolean apply() throws Exception;
-    }
-
     @Override
     public void close() throws IOException {
+        if(activeTransaction != null){
+            abort(activeTransaction);
+        }
+
         try {
             if (file != null) {
                 file.close();
@@ -491,6 +465,7 @@ public class KV implements AutoCloseable {
             file = null;
             tree = null;
             free = null;
+            activeTransaction = null;
 
             clearPending();
             failed = false;
@@ -498,9 +473,4 @@ public class KV implements AutoCloseable {
     }
 
 
-    private record Meta(
-            long root,
-            long pages,
-            FreeList.State freeState
-    ) {}
 }

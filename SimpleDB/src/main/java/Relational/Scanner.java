@@ -15,7 +15,7 @@ public final class Scanner {
     public final DBRecord key1;
     public final DBRecord key2;
 
-    private DB db;
+    private DBTX tx;
     private TableDef table;
     private int index;
 
@@ -35,8 +35,8 @@ public final class Scanner {
         this.key2 = key2;
     }
 
-    void init(DB db, TableDef table, int index, BIter iterator, byte[] endKey) {
-        this.db = db;
+    void init(DBTX tx, TableDef table, int index, BIter iterator, byte[] endKey) {
+        this.tx = tx;
         this.table = table;
         this.index = index;
         this.iterator = iterator;
@@ -46,7 +46,11 @@ public final class Scanner {
     }
 
     public boolean valid() {
-        if (iterator == null || !iterator.valid()) {
+        if (tx == null
+                || !tx.isActive()
+                || iterator == null
+                || !iterator.valid()
+        ) {
             return false;
         }
 
@@ -89,7 +93,7 @@ public final class Scanner {
 
         if (index == 0) {
             // The primary entry already contains the whole row.
-            row = DB.decodeRow(table, pair.key(), pair.value());
+            row = DBTX.decodeRow(table, pair.key(), pair.value());
         } else {
             // A secondary entry contains indexed columns
             // and all primary-key columns inside its key.
@@ -119,7 +123,7 @@ public final class Scanner {
             }
 
             // dbGet replaces the lookup with the complete row.
-            if (!db.dbGet(table, row)) {
+            if (!tx.dbGet(table, row)) {
                 throw new IOException("Secondary index points to a missing row");
             }
         }

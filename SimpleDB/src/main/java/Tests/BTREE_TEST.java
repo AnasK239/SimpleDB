@@ -1,4 +1,7 @@
-package BTree;
+package Tests;
+
+import BTree.BNode;
+import BTree.BTREE;
 
 public class BTREE_TEST {
 

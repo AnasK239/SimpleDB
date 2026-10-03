@@ -1,4 +1,4 @@
-package Relational;
+package Tests;
 import BTree.UpdateResult;
 import Relational.DB;
 import Relational.DBRecord;

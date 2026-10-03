@@ -1,8 +1,10 @@
-package Relational;
+package Tests;
 
 import KV.Comparison;
+import Relational.DB;
+import Relational.DBRecord;
+import Relational.Scanner;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 

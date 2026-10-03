@@ -1,4 +1,4 @@
-package Relational;
+package Tests;
 
 import BTree.BIter;
 import KV.*;
